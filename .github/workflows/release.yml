@@ -1,0 +1,74 @@
+name: Release
+
+# push a tag like v0.1.0 to build all platforms and publish a release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # the TLS library needs NASM on Windows; this uses its prebuilt objects instead
+  AWS_LC_SYS_PREBUILT_NASM: 1
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked --package unanimity-cli --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          name="unanimity-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir "$name"
+          cp README.md LICENSE "$name"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/unanimity.exe" "$name"
+            7z a "$name.zip" "$name"
+          else
+            cp "target/${{ matrix.target }}/release/unanimity" "$name"
+            tar -czf "$name.tar.gz" "$name"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            unanimity-*.zip
+            unanimity-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: sha256sum unanimity-* > SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${{ github.ref_name }}"
+          unanimity-* SHA256SUMS
+          --repo "${{ github.repository }}"
+          --generate-notes
